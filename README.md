@@ -1,0 +1,1 @@
+Stream Raspberry Pi webcam and microphone to remote peer via webrtc and play remote audio directly.
