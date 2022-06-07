@@ -15,6 +15,10 @@ from aiortc.contrib.media import MediaPlayer, MediaRelay, MediaStreamError, Medi
 import pyaudio
 import numpy as np
 
+# pigpio lib
+import pigpio
+import psutil
+
 sio = socketio.AsyncClient(ssl_verify=False)
 ROOT = os.path.dirname(__file__)
 
@@ -29,7 +33,10 @@ task: asyncio.Task
 webcam = None
 relay = None
 
-with open('config.json',"r", encoding="utf-8") as f:
+pi = None
+
+with open(os.path.join(ROOT, 'config.json'),"r", encoding="utf-8") as f:
+# with open(os.environ['HOME']+'/Projects/rtcServer/config.json',"r", encoding="utf-8") as f:
     config = json.load(f)
     # deviceid = json.load(devInfoRaw)["deviceid"]
 
@@ -92,7 +99,40 @@ async def hangup():
 
 @sio.event
 def disconnect():
+    if pi is not None:
+        servoControl(1500)
     print('disconnected from server')
+
+@sio.on("servo-control")
+def on_servoControl(pwm):
+    # pwm = payload["pwm"]
+    servoControl(pwm)
+
+def servoControl(pwm):
+    if not pi.connected:
+        servoInit()
+    else:
+        pi.set_mode(18, pigpio.OUTPUT)
+        if pwm >= 500 and pwm <= 2500:
+            pi.set_servo_pulsewidth(18, pwm)
+        elif "pwm" in pwm and pwm["pwm"] >= 500 and pwm["pwm"] <= 2500:
+            pi.set_servo_pulsewidth(18, pwm["pwm"])
+        else:
+            print("pwm out of range!")
+        
+def checkProc(proc) -> bool:
+    procs = {p.pid:p.info for p in psutil.process_iter(['name'])}
+    if {'name': proc} in procs.values():
+        return True
+    else:
+        return False
+    
+def servoInit():
+    if not checkProc('pigpiod'):
+        os.system("sudo pigpiod")
+    global pi
+    if pi is None:
+        pi = pigpio.pi()
 
 async def msgHandler(msg:str, pc:RTCPeerConnection):
     if isinstance(msg,dict):
@@ -104,7 +144,11 @@ async def msgHandler(msg:str, pc:RTCPeerConnection):
             # """
             # prepare local media
             # player = MediaPlayer(os.path.join(ROOT, "demo-instruct.wav"))
-            microphone = MediaPlayer('sysdefault:CARD=Device', format='alsa')
+            isAudio = True
+            try:
+                microphone = MediaPlayer('sysdefault:CARD=Device', format='alsa')
+            except:
+                isAudio = False
             global webcam, relay
             if relay is None:
                 webcam = MediaPlayer('/dev/video2', format='v4l2', options={
@@ -119,17 +163,16 @@ async def msgHandler(msg:str, pc:RTCPeerConnection):
                     # 'rtbufsize':'2M',
                     # 'pix_fmt':'h264'
                 }) 
-                # webcam = MediaPlayer('/dev/video2')
                 relay = MediaRelay()
             video = relay.subscribe(webcam.video,False)
-            audio = relay.subscribe(microphone.audio,True)
+            audio = relay.subscribe(microphone.audio,False) if isAudio else None
 
             # pc.addTrack(video)
             # pc.addTrack(playerAudio.audio)
             # recorder.addTrack(track)
             # pc.addTrack(microphone.audio)
             for t in pc.getTransceivers():
-                if t.kind == "audio" and audio:
+                if t.kind == "audio" and isAudio:
                     pc.addTrack(audio)
                 elif t.kind == "video" and video:
                     pc.addTrack(video)
@@ -160,14 +203,11 @@ async def shutdown():
 
 async def init_peer():
     async with aiohttp.ClientSession() as session:
-        async with session.get(config["base_url"]+config["path"]) as resp:
+        async with session.get(config["base_url"]+config["path"], ssl=False) as resp:
             assert resp.status == 200
             await sio.connect(config["base_url"])
-    # requests.get('http://106.14.157.244')
-    # sio.connect()
     print("sid:",sio.sid)
-    # await sio.emit("find","123")
-    # await sio.emit("accept")
+    servoInit()
     await sio.wait()
 
 async def offer():
@@ -177,10 +217,7 @@ async def offer():
     configuration = RTCConfiguration()
     # iceServer = RTCIceServer(urls="stun:stun3.l.google.com:19302")
     iceServer = RTCIceServer(urls=config["turnserver"],username=config["username"],credential=config["credential"])
-    # iceServer = RTCIceServer(urls="turn:106.14.157.244:3478",username="root",credential="123456")
-    # configuration.iceServers = [iceServer]
     configuration.iceServers = [iceServer]
-    # configuration.iceServers = [iceServer1,iceServer2,iceServer3]
     
     global pc
     try:
@@ -301,7 +338,7 @@ async def offer():
                 except MediaStreamError:
                     break
                 # print(frame.to_ndarray().astype(np.int16))
-                stream.write(frame.to_ndarray().astype(np.int16).tobytes())
+                stream.write(frame.to_ndarray().astype(np.int16).tobytes(),960)
             stream.stop_stream()
             stream.close()
             p.terminate()
